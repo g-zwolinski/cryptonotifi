@@ -4,6 +4,12 @@ const ccxt = require ('ccxt')
     , dateFormat = require('dateformat')
     , config = require('./config.js')
     , telegram = require('./telegram.js')
+    , MACD = require('technicalindicators').MACD
+    , SMA = require('technicalindicators').SMA
+    , OBV = require('technicalindicators').OBV
+    , PSAR = require('technicalindicators').PSAR
+    , ROC = require('technicalindicators').ROC
+    , RSI = require('technicalindicators').RSI
 
 checkErr = function(err, exchangeId, market){
     if(market === undefined) market = ''
@@ -34,14 +40,36 @@ checkErr = function(err, exchangeId, market){
         throw err
     }
 }
+
+let StochRSI = function (timePeriod, kPeriod, dPeriod, rsi){
+    let closes = [1, 2, 3, 4];
+    let fastK = [], prev, min, max
+
+    for(let i = timePeriod; i < rsi.length; i++){
+        prev = rsi.slice((i + 1) - timePeriod, i + 1)
+        min  = Math.min(...prev)
+        max  = Math.max(...prev)
+
+        fastK.push(((rsi[i] - min) / (max - min)) * 100);
+    }
+
+    let k = SMA.calculate({ values: fastK, period: kPeriod }),
+        d = SMA.calculate({ values: k, period: dPeriod })
+
+    return {
+        k: k.slice(-1 * Math.min(k.length, d.length)),
+        d: d.slice(-1 * Math.min(k.length, d.length))
+    }
+}
+
 let percentageDifference = function(a,b){
     var percentage = a / b * 100
     return Math.round(percentage*10)/10
 }
 
-async function getOHLCV(exchange, symbol){
+async function getIndicators(exchange, symbol){
     let limit = undefined
-    let interval = '1m'
+    let interval = config.interval
 
     // enable either of the following two lines
     if(!config.warnOnFetchOHLCVLimitArgument) exchange.options['warnOnFetchOHLCVLimitArgument'] = false
@@ -82,10 +110,69 @@ async function getOHLCV(exchange, symbol){
     if(sendNotification){
         await telegram.sendMessage(message)
     }
+
+    let o = []
+    let h = []
+    let l = []
+    let c = []
+    let v = []
+
+    for(var i = 0; i < ohlcv.length; i++){
+        o.push(ohlcv[i][1])
+        h.push(ohlcv[i][2])
+        l.push(ohlcv[i][3])
+        c.push(ohlcv[i][4])
+        v.push(ohlcv[i][5])
+    }
+
+    /* MACD */
+    let macdInput = {
+      values            : c,
+      fastPeriod        : config.MACD.fastPeriod,
+      slowPeriod        : config.MACD.slowPeriod,
+      signalPeriod      : config.MACD.signalPeriod,
+      SimpleMAOscillator: config.MACD.SimpleMAOscillator,
+      SimpleMASignal    : config.MACD.SimpleMASignal
+    }
+    let resultsMACD = MACD.calculate(macdInput)
+
+    /* OBV */
+    let obvInput = {
+      close : c,
+      volume : v
+    }
+    let resultsOBV = OBV.calculate(obvInput)
+
+    /* PSAR */
+    let psarInput = {
+        high: h, 
+        low: l, 
+        step: config.PSAR.step, 
+        max: config.PSAR.max
+    }
+    let resultsPSAR = PSAR.calculate(psarInput)
+
+    /* RSI */
+    let inputRSI = {
+      values : c,
+      period : config.RSI.period
+    }
+    let resultsRSI = RSI.calculate(inputRSI)
+
+    /* StochRSI */
+    let resultsStochRSI = StochRSI(config.RSI.period, config.StochRSI.kPeriod, config.StochRSI.dPeriod, resultsRSI)
+
+    /* ROC */
+    let inputROCbyRSI = {period : config.ROC.period, values : resultsRSI}
+    let resultsROCbyRSI = ROC.calculate(inputROCbyRSI)
+    // let inputROCbyStochRSI = {period : config.ROC.period, values : resultsStochRSI}
+    // let resultsROCbyStochRSI = ROC.calculate(inputROCbyStochRSI)
+
+    if(config.showLog) console.log(resultsMACD, resultsOBV, resultsPSAR, resultsRSI, resultsStochRSI, resultsROCbyRSI/*, resultsROCbyStochRSI*/)
 }
 
 async function main() {
-
+    // console.log(RSI)
     let exchanges = []
     let succeeded = 0
     let failed = 0
@@ -105,7 +192,7 @@ async function main() {
                 for (let market in exchange.markets) {
                     if(config.showLog) console.log(market)
                     if(config.markets.includes(toString(market)) || config.markets.length === 0){
-                        await getOHLCV(exchange, market)
+                        await getIndicators(exchange, market)
                     }
                 }
             } catch (err) {
